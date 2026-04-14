@@ -1,0 +1,6 @@
+# Generated Python bytecode
+__pycache__/
+*.py[cod]
+
+# Generated API pulls and analysis outputs
+output/
