@@ -14,8 +14,8 @@ from cizr_singles import (
 )
 
 
-def csv_gz_path(directory: str, filename: str) -> Path:
-    """Build a CSV gzip output path from user-entered directory and base filename."""
+def clean_csv_gz_filename(filename: str) -> str:
+    """Return a CSV gzip filename from a user-entered base filename."""
     clean_name = filename.strip()
     if clean_name.lower().endswith(".csv.gz"):
         clean_name = clean_name[:-7]
@@ -25,19 +25,7 @@ def csv_gz_path(directory: str, filename: str) -> Path:
     if not clean_name:
         clean_name = CSV_GZ_OUTPUT.stem.removesuffix(".csv")
 
-    return Path(directory).expanduser() / f"{clean_name}.csv.gz"
-
-
-def storage_directory_options() -> dict[str, Path]:
-    """Return common local storage locations for the directory selector."""
-    home = Path.home()
-    return {
-        "Project output folder": OUTPUT_DIR,
-        "Downloads": home / "Downloads",
-        "Documents": home / "Documents",
-        "Desktop": home / "Desktop",
-        "Custom path": OUTPUT_DIR,
-    }
+    return f"{clean_name}.csv.gz"
 
 
 def default_download_state() -> dict[str, Any]:
@@ -189,15 +177,24 @@ def render_download_status(state: dict[str, Any]) -> None:
         st.error(state["error"])
     elif state["summary"]:
         summary = state["summary"]
-        st.success(f"Wrote {summary['csv_output']}")
+        csv_output = Path(summary["csv_output"])
+        st.success("Export ready.")
         st.metric("Rows", f"{summary['rows']:,}")
         if "unique_matches" in summary:
             st.metric("Unique matches", f"{summary['unique_matches']:,}")
         if "first_date" in summary and "last_date" in summary:
             st.write(f"Date range: {summary['first_date']} through {summary['last_date']}")
         st.write(f"Content type: {summary['content_type']}")
-        st.write(f"Raw response: `{summary['raw_output']}`")
-        st.write(f"CSV gzip: `{summary['csv_output']}`")
+        if csv_output.exists():
+            st.download_button(
+                "Download CSV gzip",
+                data=csv_output.read_bytes(),
+                file_name=csv_output.name,
+                mime="application/gzip",
+                type="primary",
+            )
+        else:
+            st.warning("The export finished, but the temporary download file is no longer available.")
 
     if state["messages"]:
         with st.expander("Activity", expanded=state["running"]):
@@ -215,17 +212,11 @@ def main() -> None:
     st.title("NC State - Data Retrieval")
     st.write("Download the Singles match stats export and store it as a gzipped CSV.")
 
-    directory_options = storage_directory_options()
-    selected_directory = st.selectbox("Storage directory", options=list(directory_options), disabled=running)
-    if selected_directory == "Custom path":
-        output_dir = st.text_input("Custom storage directory", value=str(OUTPUT_DIR), disabled=running)
-    else:
-        output_dir = str(directory_options[selected_directory])
-
     output_name = st.text_input("Filename", value=CSV_GZ_OUTPUT.name.removesuffix(".csv.gz"), disabled=running)
-    output_path = csv_gz_path(output_dir, output_name)
+    download_filename = clean_csv_gz_filename(output_name)
+    output_path = OUTPUT_DIR / download_filename
     raw_output_path = output_path.with_suffix("").with_suffix(".json")
-    st.caption(f"Will save to `{output_path}`")
+    st.caption("After retrieval, use the download button to save the gzip CSV to your machine.")
 
     if st.button("Retrieve singles data", type="primary", disabled=running):
         start_download(output_path, raw_output_path)
