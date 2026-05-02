@@ -13,7 +13,9 @@ The app renders a simple "NC State - Data Retrieval" interface with:
 - live progress and status messages while the export is running,
 - a cancel button for active downloads,
 - summary metrics after completion, including row count, unique match count when available, date range when available, and response content type,
-- a download button for the generated `.csv.gz` file.
+- a download button for the generated `.csv.gz` file,
+- a review section that deduplicates the export into one row per match,
+- a match-name editing flow that lets the user pick specific matches, type replacement names, and run a dry run or execute metadata reuploads back to CIZR.
 
 Long-running retrieval work is moved into a background thread so Streamlit can keep refreshing the page and showing progress. The thread communicates with the UI through a `queue.Queue`, and shared state is stored in `st.session_state["download_state"]`. Cancellation is handled with a `threading.Event`; the download/conversion code checks that event between network chunks and while writing CSV rows.
 
@@ -54,6 +56,8 @@ Default outputs are:
 `src/fetch_singles.py` is the lightweight CLI equivalent of the Streamlit workflow. It calls `retrieve_singles()`, prints the endpoint/status/content type, and reports output paths plus row/date summary information.
 
 `src/main.py` is a larger API debugging and maintenance utility. It supports probing pagination-style query parameters, checking match-specific endpoints, comparing all-for-user match results, generating player ID tables from the reconciled workbook, proposing player ID updates, and optionally applying selected player ID updates back to CIZR metadata.
+
+It now also supports applying selected match-name updates from `output/proposed_match_name_updates.csv`, with dry-run and execute audit CSVs written into `output/`.
 
 ## CSV Helper Scripts
 

@@ -15,12 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cizr_singles import INTEGRATION_TOKEN as BUNDLED_INTEGRATION_TOKEN
+
 
 TEAM_ID = os.environ.get("CIZR_TEAM_ID", "5a7c84871100000100e61426")
 STAT_GROUP = os.environ.get("CIZR_STAT_GROUP", "Singles")
 BASE_URL = f"https://www.cizrtennis.com/api/matchStats/team/{TEAM_ID}/{STAT_GROUP}"
 OUTPUT_DIR = Path("output")
 HOST = "https://www.cizrtennis.com"
+PLAYER_ID_UPDATE_CSV = OUTPUT_DIR / "proposed_player_id_updates.csv"
+PLAYER_ID_DRY_RUN_RESULTS = OUTPUT_DIR / "player_id_update_dry_run_results.csv"
+PLAYER_ID_EXECUTE_RESULTS = OUTPUT_DIR / "player_id_update_execute_results.csv"
+MATCH_NAME_UPDATE_CSV = OUTPUT_DIR / "proposed_match_name_updates.csv"
+MATCH_NAME_DRY_RUN_RESULTS = OUTPUT_DIR / "match_name_update_dry_run_results.csv"
+MATCH_NAME_EXECUTE_RESULTS = OUTPUT_DIR / "match_name_update_execute_results.csv"
 
 
 @dataclass
@@ -44,6 +52,8 @@ def get_token() -> str:
         token = os.environ.get(name)
         if token:
             return token
+    if BUNDLED_INTEGRATION_TOKEN:
+        return BUNDLED_INTEGRATION_TOKEN
     raise RuntimeError(
         "No CIZR token was found. Set CIZR_TOKEN in this same shell, then run: "
         "python src/main.py"
@@ -873,7 +883,7 @@ def generate_player_id_table(token: str, limit: int | None = None) -> int:
 def parse_player_id_update_args(args: list[str]) -> dict[str, Any]:
     """Parse the small updater argument set without changing the older CLI flow."""
     options: dict[str, Any] = {
-        "csv_path": OUTPUT_DIR / "proposed_player_id_updates.csv",
+        "csv_path": PLAYER_ID_UPDATE_CSV,
         "limit": None,
         "match_ids": set(),
         "all": False,
@@ -945,6 +955,86 @@ def load_selected_player_id_updates(
     return selected
 
 
+def parse_match_name_update_args(args: list[str]) -> dict[str, Any]:
+    """Parse match-name update options without disturbing the older CLI paths."""
+    options: dict[str, Any] = {
+        "csv_path": MATCH_NAME_UPDATE_CSV,
+        "limit": None,
+        "match_ids": set(),
+        "all": False,
+        "execute": False,
+    }
+
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--csv":
+            index += 1
+            if index >= len(args):
+                raise ValueError("--csv requires a path")
+            options["csv_path"] = Path(args[index])
+        elif arg == "--limit":
+            index += 1
+            if index >= len(args):
+                raise ValueError("--limit requires a positive integer")
+            limit = int(args[index])
+            if limit <= 0:
+                raise ValueError("--limit must be greater than zero")
+            options["limit"] = limit
+        elif arg == "--match-id":
+            index += 1
+            if index >= len(args):
+                raise ValueError("--match-id requires a match id")
+            for match_id in args[index].split(","):
+                if match_id.strip():
+                    options["match_ids"].add(match_id.strip())
+        elif arg == "--all":
+            options["all"] = True
+        elif arg == "--execute":
+            options["execute"] = True
+        else:
+            raise ValueError(f"Unknown option for --apply-match-name-updates: {arg}")
+        index += 1
+
+    return options
+
+
+def load_selected_match_name_updates(
+    csv_path: Path,
+    limit: int | None,
+    match_ids: set[str],
+    include_all: bool,
+) -> list[dict[str, str]]:
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Missing updates CSV: {csv_path}")
+
+    rows = read_csv_rows(csv_path)
+    required_fields = {"match_id"}
+    missing_fields = required_fields - set(rows[0].keys() if rows else [])
+    if missing_fields:
+        raise ValueError(f"{csv_path} is missing required columns: {', '.join(sorted(missing_fields))}")
+
+    selected = [
+        row
+        for row in rows
+        if row.get("match_id", "").strip()
+        and any(
+            row.get(field, "").strip()
+            for field in ("new_match_name", "new_player_name", "new_opp_name")
+        )
+    ]
+    if match_ids:
+        selected = [row for row in selected if row.get("match_id", "").strip() in match_ids]
+
+    if not include_all and limit is None and not match_ids:
+        raise ValueError("Choose --limit N, --match-id ID, or --all before applying updates.")
+
+    if limit is not None:
+        selected = selected[:limit]
+
+    return selected
+
+
 def clean_metadata_for_update(metadata: dict[str, Any]) -> dict[str, Any]:
     """Mirror the app's basic metadata cleanup before PUT /metadata."""
     if metadata.get("teamType") == "Singles":
@@ -991,6 +1081,196 @@ def apply_update_to_metadata(
     if new_email:
         player["email"] = new_email
     return True, current_api_id, "prepared"
+
+
+def apply_match_name_to_metadata(
+    metadata: dict[str, Any],
+    row: dict[str, str],
+) -> tuple[bool, dict[str, str], str]:
+    old_values = {
+        "old_match_name": str(metadata.get("name", "") or "").strip(),
+        "old_player_name": "",
+        "old_opp_name": "",
+    }
+    changed_fields: list[str] = []
+    issues: list[str] = []
+
+    new_match_name = row.get("new_match_name", "").strip()
+    if new_match_name:
+        if old_values["old_match_name"] == new_match_name:
+            issues.append("API already has this match name")
+        else:
+            metadata["name"] = new_match_name
+            changed_fields.append("match name")
+
+    players = metadata.get("players")
+    teams = metadata.get("teams")
+    if isinstance(players, list):
+        if len(players) >= 1 and isinstance(players[0], list) and players[0] and isinstance(players[0][0], dict):
+            old_values["old_player_name"] = str(players[0][0].get("name", "") or "").strip()
+            new_player_name = row.get("new_player_name", "").strip()
+            if new_player_name:
+                if old_values["old_player_name"] == new_player_name:
+                    issues.append("API already has this player name")
+                else:
+                    players[0][0]["name"] = new_player_name
+                    if isinstance(teams, list) and len(teams) >= 1:
+                        teams[0] = new_player_name
+                    changed_fields.append("player name")
+        elif row.get("new_player_name", "").strip():
+            issues.append("metadata.players[0][0] is missing")
+
+        if len(players) >= 2 and isinstance(players[1], list) and players[1] and isinstance(players[1][0], dict):
+            old_values["old_opp_name"] = str(players[1][0].get("name", "") or "").strip()
+            new_opp_name = row.get("new_opp_name", "").strip()
+            if new_opp_name:
+                if old_values["old_opp_name"] == new_opp_name:
+                    issues.append("API already has this opponent name")
+                else:
+                    players[1][0]["name"] = new_opp_name
+                    if isinstance(teams, list) and len(teams) >= 2:
+                        teams[1] = new_opp_name
+                    changed_fields.append("opponent name")
+        elif row.get("new_opp_name", "").strip():
+            issues.append("metadata.players[1][0] is missing")
+    elif row.get("new_player_name", "").strip() or row.get("new_opp_name", "").strip():
+        issues.append("metadata.players is missing or is not a list")
+
+    if changed_fields:
+        return True, old_values, f"prepared: {', '.join(changed_fields)}"
+    if issues:
+        return False, old_values, "; ".join(issues)
+    return False, old_values, "No non-blank changes were requested"
+
+
+def apply_match_name_updates(token: str, args: list[str]) -> int:
+    try:
+        options = parse_match_name_update_args(args)
+        rows = load_selected_match_name_updates(
+            options["csv_path"],
+            options["limit"],
+            options["match_ids"],
+            options["all"],
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    execute = bool(options["execute"])
+    mode = "EXECUTE" if execute else "DRY RUN"
+    if not rows:
+        print("No match-name update rows matched the requested selection.")
+        return 0
+
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped[row.get("match_id", "").strip()].append(row)
+
+    print(f"Match-name update mode: {mode}")
+    print(f"Update rows selected: {len(rows)} across {len(grouped)} matches")
+    if not execute:
+        print("No CIZR records will be changed. Add --execute after reviewing the dry run.")
+
+    results: list[dict[str, str]] = []
+    updated_rows = 0
+    skipped_rows = 0
+    failed_matches = 0
+
+    for match_index, (match_id, match_rows) in enumerate(grouped.items(), start=1):
+        print(f"[{match_index}/{len(grouped)}] {match_id}: {len(match_rows)} row(s)")
+        result = fetch_json(f"match_{match_id}", build_api_url(f"/api/matches/{match_id}"), token)
+        if not (result.status and 200 <= result.status < 300 and isinstance(result.json_data, dict)):
+            failed_matches += 1
+            error = result.error or result.body_text[:200]
+            for row in match_rows:
+                results.append(
+                    {
+                        **match_name_audit_base(row),
+                        "old_match_name": "",
+                        "old_player_name": "",
+                        "old_opp_name": "",
+                        "status": "fetch_failed",
+                        "message": error,
+                    }
+                )
+            continue
+
+        match_data = result.json_data
+        metadata = match_data.get("metadata")
+        if not isinstance(metadata, dict):
+            failed_matches += 1
+            for row in match_rows:
+                results.append(
+                    {
+                        **match_name_audit_base(row),
+                        "old_match_name": "",
+                        "old_player_name": "",
+                        "old_opp_name": "",
+                        "status": "skipped",
+                        "message": "match metadata is missing",
+                    }
+                )
+            continue
+
+        changed = False
+        for row in match_rows:
+            did_update, old_values, message = apply_match_name_to_metadata(metadata, row)
+            if did_update:
+                changed = True
+                updated_rows += 1
+                status = "prepared" if not execute else "updated"
+            else:
+                skipped_rows += 1
+                status = "skipped"
+            results.append(
+                {
+                    **match_name_audit_base(row),
+                    **old_values,
+                    "status": status,
+                    "message": message,
+                }
+            )
+
+        if changed and execute:
+            metadata = clean_metadata_for_update(metadata)
+            update = send_json("PUT", f"update_match_name_{match_id}", build_api_url(f"/api/matches/{match_id}/metadata"), token, metadata)
+            if not (update.status and 200 <= update.status < 300):
+                failed_matches += 1
+                message = update.error or update.body_text[:200]
+                print(f"  metadata update failed: {update.status} {message}")
+                for result_row in results:
+                    if result_row["match_id"] == match_id and result_row["status"] == "updated":
+                        result_row["status"] = "update_failed"
+                        result_row["message"] = message
+            else:
+                print("  metadata updated")
+            time.sleep(0.2)
+        elif changed:
+            print("  dry run prepared metadata update")
+        else:
+            print("  no metadata changes needed")
+
+    audit_fields = [
+        "match_id",
+        "date",
+        "old_match_name",
+        "new_match_name",
+        "old_player_name",
+        "new_player_name",
+        "old_opp_name",
+        "new_opp_name",
+        "status",
+        "message",
+    ]
+    audit_path = MATCH_NAME_EXECUTE_RESULTS if execute else MATCH_NAME_DRY_RUN_RESULTS
+    write_csv(audit_path, results, audit_fields)
+
+    print("\nSummary:")
+    print(f"- Rows prepared/updated: {updated_rows}")
+    print(f"- Rows skipped: {skipped_rows}")
+    print(f"- Matches with fetch/update failures: {failed_matches}")
+    print(f"- Audit CSV: {audit_path}")
+    return 1 if failed_matches else 0
 
 
 def apply_player_id_updates(token: str, args: list[str]) -> int:
@@ -1092,7 +1372,7 @@ def apply_player_id_updates(token: str, args: list[str]) -> int:
         "status",
         "message",
     ]
-    audit_path = OUTPUT_DIR / ("player_id_update_execute_results.csv" if execute else "player_id_update_dry_run_results.csv")
+    audit_path = PLAYER_ID_EXECUTE_RESULTS if execute else PLAYER_ID_DRY_RUN_RESULTS
     write_csv(audit_path, results, audit_fields)
 
     print("\nSummary:")
@@ -1113,6 +1393,16 @@ def audit_base(row: dict[str, str]) -> dict[str, str]:
         "player_slot": row.get("player_slot", ""),
         "new_player_id": row.get("new_player_id", ""),
         "new_email": row.get("new_email", ""),
+    }
+
+
+def match_name_audit_base(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "match_id": row.get("match_id", ""),
+        "date": row.get("date", ""),
+        "new_match_name": row.get("new_match_name", ""),
+        "new_player_name": row.get("new_player_name", ""),
+        "new_opp_name": row.get("new_opp_name", ""),
     }
 
 
@@ -1195,6 +1485,9 @@ def main() -> int:
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--apply-player-id-updates":
         return apply_player_id_updates(token, sys.argv[2:])
+
+    if len(sys.argv) >= 2 and sys.argv[1] == "--apply-match-name-updates":
+        return apply_match_name_updates(token, sys.argv[2:])
 
     if len(sys.argv) >= 2 and sys.argv[1] == "--player-id-table":
         limit = None
